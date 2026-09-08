@@ -4,3 +4,5 @@ import ReactiveModules.Network
 import ReactiveModules.Heap
 import ReactiveModules.Effects
 import ReactiveModules.Coroutine
+import ReactiveModules.Objects
+import ReactiveModules.Native

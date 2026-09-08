@@ -5,7 +5,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-from zrth.verified import compile_coroutine, compile_module
+from zrth.verified import compile_coroutine, compile_module, compile_native
+from zrth.native_checks import Recorder
+from zrth.native_runtime import Finished
 
 ROOT = Path(__file__).resolve().parent
 
@@ -22,7 +24,8 @@ def main():
                         str(ROOT.parent / "python/tests/test_verified.py"),
                         str(ROOT.parent / "python/tests/test_verified_control_flow.py"),
                         str(ROOT.parent / "python/tests/test_effects.py"),
-                        str(ROOT.parent / "python/tests/test_verified_async.py")], check=True)
+                        str(ROOT.parent / "python/tests/test_verified_async.py"),
+                        str(ROOT.parent / "python/tests/test_verified_native.py")], check=True)
     suites = {
         "register": (["initial", "step"], ["Register.never_decreases", "Register.covers_offer", "Register.returns_an_input"]),
         "fold_register": (["step"], ["FoldRegister.never_decreases", "FoldRegister.covers_offers"]),
@@ -64,13 +67,29 @@ def main():
         evidence=str(output / "status.json"), properties=status["properties"],
         request_coroutine_lowering="checked", native_container_syntax="unsupported")
     print("compiled_async: proved; RM segments, heap/resumption composition, and round-trip checked", flush=True)
+    bundle = compile_native(ROOT / "examples/native_async.py")
+    output = ROOT / "bundles/native_async"
+    bundle.certify(output)
+    status = bundle.check_properties(output, ROOT / "proofs/native_async.lean", ["NativeAsync.increment_result"])
+    recorder = Recorder(per_signature=1)
+    for limit in (0, 1, 4):
+        task = recorder.attach(bundle.task("step", limit))
+        assert task.run() == Finished(({i: i + 1 for i in range(limit)}, limit, limit))
+    recorder.check(bundle, output)
+    report["native_async"] = dict(result="translation-checked",
+        source_sha256=bundle.artifact["source_sha256"],
+        evidence=str(output / "status.json"),
+        runtime_evidence=str(output / "runtime-status.json"),
+        runtime_samples=len(recorder.samples), properties=status["properties"],
+        whole_step_correctness="not-asserted")
+    print("native_async: translation and helper contract checked; native containers and nested awaits kernel-replayed", flush=True)
     subprocess.run([sys.executable, str(ROOT / "check_effects.py")], check=True)
     foundation = json.loads((ROOT / "bundles/effects/status.json").read_text())
     report["effects_foundation"] = dict(result=foundation["model_checks"],
         evidence=str(ROOT / "bundles/effects/status.json"),
         container_lowering=foundation["container_lowering"], async_lowering=foundation["async_lowering"])
     summary.write_text(json.dumps(report, indent=2) + "\n")
-    print("Checked-library checks passed. This does not compile async Paxos yet.", flush=True)
+    print("Checked-library checks passed. Native/async translation evidence is separate from algorithm-property proofs.", flush=True)
 
 
 if __name__ == "__main__":

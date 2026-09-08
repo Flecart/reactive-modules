@@ -1,11 +1,14 @@
 # Unbounded containers and explicit async effects: foundation
 
+For the compiler accepting native syntax and nested async control flow, see
+[NATIVE.md](NATIVE.md). This page describes the original effect-service foundation.
+
 This increment adds executable integer dictionary/set services and a mathematical
 heap/suspension model. It does not itself establish compiler correctness.
 The separate [async compiler connection](ASYNC.md) now compiles typed
 `async def` handlers using top-level `await Request(...)` into RM segments and
-checks composition with this model. Native Python `dict`/`set` syntax remains
-unsupported by the compiler.
+checks composition with this model. Native Python `dict`/`set` syntax uses the
+separate `compile_native` backend, not that explicit-Request entrypoint.
 
 ## Try it
 
@@ -111,14 +114,14 @@ ordinary kernel checking. These are finite differential checks, **not** a
 universal Python-runtime equivalence proof. Axiom audits reject `sorry` and
 `native_decide` dependencies. Existing register/channel proofs are rechecked too.
 
-## Next compiler work
+## Relationship to the native compiler
 
 The checked heap-service boundary and top-level Request suspension/frame lowering
 are now connected; native scalar/tensor wires still do not store a heap.
 
-1. Elaborate native typed container operations into that interface, including allocation,
-   aliasing, missing-key exceptions, and eventually nested/reference-valued schemas.
-2. Extend suspension lowering to branches, loops, async helpers, and exceptions.
-   An `await` must not be erased into a synchronous call.
-
-Paxos remains on its legacy source-specific path until its constructs are covered.
+The newer object-machine backend elaborates native container operations,
+allocation, aliases, nested references, missing-key exceptions, and async
+branches/loops/helper frames. It has its own translation and runtime evidence;
+the foundation checks here are not relabeled as proofs of that lowering.
+The native compiler covers the constructs in the unchanged Paxos fixture;
+its older source-specific artifact remains a separate bounded model.

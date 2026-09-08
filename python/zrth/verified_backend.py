@@ -20,6 +20,7 @@ def provenance():
     paths += sorted((project / "ReactiveModules").glob("*.lean"))
     paths += [Path(__file__).resolve(), Path(__file__).with_name("verified.py")]
     paths += [Path(__file__).with_name("verified_async.py"), Path(__file__).with_name("effects.py")]
+    paths += [Path(__file__).with_name(name) for name in ("native_frontend.py", "native_runtime.py", "verified_native.py", "native_checks.py")]
     return {str(p.relative_to(project.parents[1])): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
@@ -250,6 +251,10 @@ class VerificationBundle:
         if result.returncode:
             raise ValueError("Lean rejected the bundle:\n" + result.stdout + result.stderr)
         audit_axioms(result.stdout)
+        if provenance() != self.artifact["toolchain_sources"]:
+            raise ValueError("verification tooling changed during checking; recompile")
+        if hashlib.sha256(Path(self.artifact["source_path"]).read_bytes()).hexdigest() != self.artifact["source_sha256"]:
+            raise ValueError("source changed during checking; recompile")
         digest = lambda filename: hashlib.sha256((path / filename).read_bytes()).hexdigest()
         (path / "status.json").write_text(json.dumps(dict(translation="checked", properties={},
             bundle_sha256=digest("bundle.json"), certificate_sha256=digest("Certificate.lean"),

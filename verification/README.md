@@ -5,6 +5,12 @@ actual RM update graphs and checks translation certificates and library contract
 in Lean. There is no per-algorithm source generator. The permissive analyzer is
 unchanged; the new API is `zrth.verified`.
 
+For native containers and more general async method bodies, see the
+[native object/async compiler](NATIVE.md). It accepts the unchanged Paxos learning
+fixture through an explicit object/transport profile, without its handwritten
+generator. The trust boundary and backend differ from the immutable-handler path
+described below; neither is a proof of CPython itself.
+
 ## Run
 
 From this checkout, with uv, Rust, just, and elan installed:
@@ -165,6 +171,6 @@ now connects top-level Request awaits to checked RM segments and this service.
 The normal runner includes both artifacts: the standalone foundation makes no
 lowering claim, while `compiled_async` checks the supported compiler connection.
 
-Native mutable-container syntax, nested awaits, and async helpers are next.
-Existing async/container-heavy code is not accepted unchanged yet. The Paxos
-learning implementation therefore retains its legacy generator.
+The [native compiler](NATIVE.md) now handles the mutable-container and async
+constructs in the Paxos compatibility fixture. Its legacy generator remains only
+for the older bounded artifact/property suite, not the new direct-source path.

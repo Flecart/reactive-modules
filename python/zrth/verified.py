@@ -507,21 +507,32 @@ def compile_coroutine(source, entrypoint, model_config=None):
     return compile_async(source, entrypoint, model_config)
 
 
+def compile_native(source, model_config=None):
+    """Compile the declared native object/async profile (all functions/methods)."""
+    from .verified_native import compile_native as compile_objects
+    return compile_objects(source, model_config)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
-    parser.add_argument("--entrypoint", action="append", required=True)
+    parser.add_argument("--entrypoint", action="append", default=[])
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--coroutine", action="store_true", help="compile one async Request handler")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--coroutine", action="store_true", help="compile one async Request handler")
+    modes.add_argument("--native", action="store_true", help="compile native object/async functions and methods")
     parser.add_argument("--proof", type=Path)
     parser.add_argument("--theorem", action="append", default=[])
     args = parser.parse_args()
     if bool(args.proof) != bool(args.theorem): parser.error("--proof and --theorem must be supplied together")
+    if not args.native and not args.entrypoint: parser.error("--entrypoint is required unless --native is selected")
+    if args.native and args.entrypoint: parser.error("--native compiles the whole library; omit --entrypoint")
     if args.coroutine and len(args.entrypoint) != 1: parser.error("--coroutine requires exactly one entrypoint")
     config = json.loads(args.config.read_text()) if args.config else {}
-    bundle = (compile_coroutine(args.source, args.entrypoint[0], config) if args.coroutine else
+    bundle = (compile_native(args.source, config) if args.native else
+              compile_coroutine(args.source, args.entrypoint[0], config) if args.coroutine else
               compile_module(args.source, args.entrypoint, config))
     bundle.certify(args.out)
     if args.proof:

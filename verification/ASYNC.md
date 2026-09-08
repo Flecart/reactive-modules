@@ -1,5 +1,9 @@
 # Compiled Request coroutines
 
+For native `dict`/`set` syntax, nested awaits, async helpers, and mutable classes,
+use the newer [native object/async compiler](NATIVE.md). This document describes
+the smaller, still-supported explicit-Request segment compiler.
+
 `zrth.verified.compile_coroutine` connects the heap/effect interface to the
 compiler. It reads Python source without importing or executing it, splits a
 supported coroutine at each await, and produces actual native RM update graphs
@@ -110,4 +114,5 @@ Lean checks the translation and authored proof without `native_decide`, `sorry`,
 or algorithm-specific correctness axioms. Axiom audits allow only the standard
 `propext`, `Quot.sound`, and `Classical.choice` dependencies.
 
-The unchanged async/container-heavy Paxos implementation is not supported yet.
+The unchanged Paxos implementation uses the separate native compiler, not this
+restricted explicit-Request entrypoint.
