@@ -2,7 +2,7 @@ name: Checked Python libraries
 
 on:
   push:
-    branches: [main, feat/strict-python-frontend]
+    branches: [main, feat/verified-python-handlers]
   pull_request:
     branches: [main]
   workflow_dispatch:

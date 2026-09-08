@@ -87,6 +87,11 @@ CPython, its parser, dataclasses, the OS, or a socket adapter. The compiler neve
 imports source modules, and certification rebinds the AST to freshly parsed
 source. Hashes identify artifacts; they are not semantic proofs.
 
+The target theorem concerns the serialized RM graph. Native bindings and the
+term-to-graph syntax interface must expose that snapshot faithfully; no theorem
+about the live Rust/PyTorch interpreter is claimed. This serialization boundary
+is part of the trusted syntax/runtime interface, not a verified Rust compiler.
+
 Only exported handler update blocks are certified here. Arbitrary RM
 initialization/composition and differential/tensor theories are not covered.
 The channel explicitly invokes compiled initial handlers and proves its network
