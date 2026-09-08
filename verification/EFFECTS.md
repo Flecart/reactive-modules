@@ -1,9 +1,11 @@
 # Unbounded containers and explicit async effects: foundation
 
 This increment adds executable integer dictionary/set services and a mathematical
-heap/suspension model. **It does not yet compile native Python `dict`, `set`, or
-`async def` into RM.** `zrth.verified` continues to reject that syntax. The
-existing scalar-handler compiler and its certificates are unchanged.
+heap/suspension model. It does not itself establish compiler correctness.
+The separate [async compiler connection](ASYNC.md) now compiles typed
+`async def` handlers using top-level `await Request(...)` into RM segments and
+checks composition with this model. Native Python `dict`/`set` syntax remains
+unsupported by the compiler.
 
 ## Try it
 
@@ -18,7 +20,8 @@ uv run python -m pytest -q python/tests/test_effects.py
 The normal `verification/check.py` runner includes the new tests/model checks.
 Evidence is written to `verification/bundles/effects`. Its manifest separately
 labels model theorems, sampled Python/model agreement, and the still-unestablished
-container and async lowering connections.
+container and async lowering connections **for this standalone foundation
+artifact**. The connected compiler has separate evidence in `bundles/compiled_async`.
 
 ## Heap interface
 
@@ -97,8 +100,9 @@ between tasks; the Python runner uses token object identity for isolation.
 
 The model abstracts terminating Python computation between effects as a supplied
 segment function. Its `serve_congr` theorem requires equality between source and
-compiled segment functions; it does not establish that equality itself. We still
-need the compiler to discharge that obligation. Likewise, the Python service
+compiled segment functions; it does not establish that equality itself. The
+new compiler discharges it for its supported subset using RM segment certificates
+and `ReactiveModules.Coroutine`. The Python service
 and coroutine runner are not mechanically proved implementations of the model.
 
 `check_effects.py` additionally replays saved/seeded request traces from native
@@ -109,12 +113,12 @@ universal Python-runtime equivalence proof. Axiom audits reject `sorry` and
 
 ## Next compiler work
 
-1. Give the RM backend a heap/effect theory or a checked heap-service boundary;
-   the current native scalar/tensor theories cannot store an unbounded heap.
-2. Elaborate typed container operations into that interface, including allocation,
-   aliasing, missing-key exceptions, and eventually nested/reference-valued schemas.
-3. Preserve async suspension points and live local state in the source model,
-   then certify source-segment/RM-segment equivalence and compose it with the
-   suspension model. An `await` must not be erased into a synchronous call.
+The checked heap-service boundary and top-level Request suspension/frame lowering
+are now connected; native scalar/tensor wires still do not store a heap.
 
-Paxos remains on its legacy source-specific path until those connections exist.
+1. Elaborate native typed container operations into that interface, including allocation,
+   aliasing, missing-key exceptions, and eventually nested/reference-valued schemas.
+2. Extend suspension lowering to branches, loops, async helpers, and exceptions.
+   An `await` must not be erased into a synchronous call.
+
+Paxos remains on its legacy source-specific path until its constructs are covered.

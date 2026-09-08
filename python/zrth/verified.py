@@ -73,9 +73,9 @@ def seq(items):
 
 
 class Parser:
-    def __init__(self, source, filename):
+    def __init__(self, source, filename, *, tree=None):
         self.source, self.filename = source, str(filename)
-        self.tree = ast.parse(source, filename=self.filename)
+        self.tree = ast.parse(source, filename=self.filename) if tree is None else tree
         self.types = {"int": INT, "bool": BOOL}
         self.functions = {}
         imports = set()
@@ -501,6 +501,12 @@ def compile_module(source, entrypoints, model_config=None):
     return make_bundle(path, hashlib.sha256(raw).hexdigest(), functions, model_config or {})
 
 
+def compile_coroutine(source, entrypoint, model_config=None):
+    """Compile a typed async handler using the declared Request effect interface."""
+    from .verified_async import compile_coroutine as compile_async
+    return compile_async(source, entrypoint, model_config)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
@@ -508,11 +514,15 @@ def main():
     parser.add_argument("--entrypoint", action="append", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--coroutine", action="store_true", help="compile one async Request handler")
     parser.add_argument("--proof", type=Path)
     parser.add_argument("--theorem", action="append", default=[])
     args = parser.parse_args()
     if bool(args.proof) != bool(args.theorem): parser.error("--proof and --theorem must be supplied together")
-    bundle = compile_module(args.source, args.entrypoint, json.loads(args.config.read_text()) if args.config else {})
+    if args.coroutine and len(args.entrypoint) != 1: parser.error("--coroutine requires exactly one entrypoint")
+    config = json.loads(args.config.read_text()) if args.config else {}
+    bundle = (compile_coroutine(args.source, args.entrypoint[0], config) if args.coroutine else
+              compile_module(args.source, args.entrypoint, config))
     bundle.certify(args.out)
     if args.proof:
         bundle.check_properties(args.out, args.proof, args.theorem)

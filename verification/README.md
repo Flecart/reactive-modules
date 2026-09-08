@@ -76,6 +76,12 @@ adapter currently accepts literal operands representable in signed 64 bits,
 but variable values and arithmetic are unbounded mathematical integers.
 Tensor execution and its overflow behavior are not the certified semantics.
 
+There is now a separate `compile_coroutine` entrypoint for typed `async def`
+handlers using top-level `await Request(...)` dictionary/set operations. It
+compiles actual RM segments and certifies their heap/resumption composition.
+This does not enable arbitrary async or native container syntax in
+`compile_module`. See [ASYNC.md](ASYNC.md) for the interface and trust boundary.
+
 `examples/fold_register.py` demonstrates a helper called inside an ordinary
 Python loop. A fixed tuple's length comes from its source type, not from a
 model-checking cutoff: every iteration is included. The lowering theorem covers
@@ -131,6 +137,7 @@ still be reviewed: compilation cannot infer the author's intention.
 | Channel liveness | Every pending/accepted request completes under infinitely-often ticks and fair loss in both directions. |
 | Non-vacuity | An actual request is accepted, delivered, and acknowledged, followed by an infinite fair execution. |
 | Incorrect register | Translation checks, the positive proof fails, and Lean proves a refutation of monotonicity. |
+| Compiled async dictionary | Returns the stored value for every integer key/value, starting empty and serving its three requests. |
 
 The channel permits loss, duplication and reordering of genuine queued packets.
 Handlers run serially to completion. A busy sender rejects new submissions;
@@ -153,9 +160,11 @@ These records are not signed security attestations.
 
 An [unbounded heap and async-effect foundation](EFFECTS.md) now supplies a tested
 integer dictionary/set service, an explicit coroutine runner, Lean model laws,
-and sampled Python/Lean trace checks. The normal runner includes these checks;
-their evidence explicitly marks container and async **lowering** unestablished.
+and sampled Python/Lean trace checks. The separate [async compiler](ASYNC.md)
+now connects top-level Request awaits to checked RM segments and this service.
+The normal runner includes both artifacts: the standalone foundation makes no
+lowering claim, while `compiled_async` checks the supported compiler connection.
 
-Connecting mutable-container semantics and async continuations to the compiler is next. Existing
-async/container-heavy code is not accepted unchanged yet. The Paxos learning
-implementation therefore retains its legacy generator until those stages pass.
+Native mutable-container syntax, nested awaits, and async helpers are next.
+Existing async/container-heavy code is not accepted unchanged yet. The Paxos
+learning implementation therefore retains its legacy generator.

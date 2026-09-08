@@ -3,3 +3,4 @@ import ReactiveModules.Validation
 import ReactiveModules.Network
 import ReactiveModules.Heap
 import ReactiveModules.Effects
+import ReactiveModules.Coroutine

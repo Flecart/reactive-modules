@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from zrth.verified import compile_module
+from zrth.verified import compile_coroutine, compile_module
 
 ROOT = Path(__file__).resolve().parent
 
@@ -21,7 +21,8 @@ def main():
         subprocess.run([sys.executable, "-m", "pytest", "-q",
                         str(ROOT.parent / "python/tests/test_verified.py"),
                         str(ROOT.parent / "python/tests/test_verified_control_flow.py"),
-                        str(ROOT.parent / "python/tests/test_effects.py")], check=True)
+                        str(ROOT.parent / "python/tests/test_effects.py"),
+                        str(ROOT.parent / "python/tests/test_verified_async.py")], check=True)
     suites = {
         "register": (["initial", "step"], ["Register.never_decreases", "Register.covers_offer", "Register.returns_an_input"]),
         "fold_register": (["step"], ["FoldRegister.never_decreases", "FoldRegister.covers_offers"]),
@@ -53,6 +54,16 @@ def main():
                             source_sha256=bundle.artifact["source_sha256"],
                             evidence=str(output / "status.json"), properties=status["properties"])
         print(f"{name}: {report[name]['result']}; translation and {len(theorems)} theorem(s) checked", flush=True)
+    bundle = compile_coroutine(ROOT / "examples/compiled_async.py", "step",
+        dict(integer_semantics="mathematical", source_subset="top-level-request-coroutines-v1",
+             heap="unbounded-integer-dictionaries-and-sets", progress="three-served-requests"))
+    output = ROOT / "bundles/compiled_async"
+    bundle.certify(output)
+    status = bundle.check_properties(output, ROOT / "proofs/compiled_async.lean", ["AsyncDictionary.round_trip"])
+    report["compiled_async"] = dict(result="proved", source_sha256=bundle.artifact["source_sha256"],
+        evidence=str(output / "status.json"), properties=status["properties"],
+        request_coroutine_lowering="checked", native_container_syntax="unsupported")
+    print("compiled_async: proved; RM segments, heap/resumption composition, and round-trip checked", flush=True)
     subprocess.run([sys.executable, str(ROOT / "check_effects.py")], check=True)
     foundation = json.loads((ROOT / "bundles/effects/status.json").read_text())
     report["effects_foundation"] = dict(result=foundation["model_checks"],

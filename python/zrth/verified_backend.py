@@ -19,6 +19,7 @@ def provenance():
     paths = [project / "lean-toolchain", project / "lakefile.toml", project / "lake-manifest.json", project / "ReactiveModules.lean"]
     paths += sorted((project / "ReactiveModules").glob("*.lean"))
     paths += [Path(__file__).resolve(), Path(__file__).with_name("verified.py")]
+    paths += [Path(__file__).with_name("verified_async.py"), Path(__file__).with_name("effects.py")]
     return {str(p.relative_to(project.parents[1])): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
@@ -226,15 +227,18 @@ class VerificationBundle:
         current = hashlib.sha256(Path(self.artifact["source_path"]).read_bytes()).hexdigest()
         if current != self.artifact["source_sha256"]: raise ValueError("source changed; recompile")
         if provenance() != self.artifact["toolchain_sources"]: raise ValueError("verification tooling changed; recompile")
+        self.validate_source()
+        (path / "bundle.json").write_text(json.dumps(self.artifact, indent=2) + "\n")
+        (path / "Certificate.lean").write_text(self.certificate())
+        return path
+
+    def validate_source(self):
         from .verified import Parser
         parser = Parser(Path(self.artifact["source_path"]).read_text(), self.artifact["source_path"])
         for name, f in self.artifact["functions"].items():
             parsed = parser.function(name)
             if any(f[k] != parsed[k] for k in ("source", "slots", "inputs", "output_sorts")):
                 raise ValueError("source AST/schema differs from the trusted parser output")
-        (path / "bundle.json").write_text(json.dumps(self.artifact, indent=2) + "\n")
-        (path / "Certificate.lean").write_text(self.certificate())
-        return path
 
     def certify(self, directory, lean_project=None):
         path = self.write(directory)
