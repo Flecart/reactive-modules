@@ -14,10 +14,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-tests", action="store_true")
     args = parser.parse_args()
+    summary = ROOT / "bundles/results.json"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text(json.dumps({"run": "not-established"}) + "\n")
     if not args.skip_tests:
         subprocess.run([sys.executable, "-m", "pytest", "-q",
                         str(ROOT.parent / "python/tests/test_verified.py"),
-                        str(ROOT.parent / "python/tests/test_verified_control_flow.py")], check=True)
+                        str(ROOT.parent / "python/tests/test_verified_control_flow.py"),
+                        str(ROOT.parent / "python/tests/test_effects.py")], check=True)
     suites = {
         "register": (["initial", "step"], ["Register.never_decreases", "Register.covers_offer", "Register.returns_an_input"]),
         "fold_register": (["step"], ["FoldRegister.never_decreases", "FoldRegister.covers_offers"]),
@@ -49,7 +53,12 @@ def main():
                             source_sha256=bundle.artifact["source_sha256"],
                             evidence=str(output / "status.json"), properties=status["properties"])
         print(f"{name}: {report[name]['result']}; translation and {len(theorems)} theorem(s) checked", flush=True)
-    (ROOT / "bundles" / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+    subprocess.run([sys.executable, str(ROOT / "check_effects.py")], check=True)
+    foundation = json.loads((ROOT / "bundles/effects/status.json").read_text())
+    report["effects_foundation"] = dict(result=foundation["model_checks"],
+        evidence=str(ROOT / "bundles/effects/status.json"),
+        container_lowering=foundation["container_lowering"], async_lowering=foundation["async_lowering"])
+    summary.write_text(json.dumps(report, indent=2) + "\n")
     print("Checked-library checks passed. This does not compile async Paxos yet.", flush=True)
 
 

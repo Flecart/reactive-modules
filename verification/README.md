@@ -151,6 +151,11 @@ revisions are pinned in the Lake manifest. Failed rechecks clear relevant succes
 statuses. Source, tooling, and certificate changes require recertification.
 These records are not signed security attestations.
 
-Generic mutable-container semantics and async continuations are next. Existing
+An [unbounded heap and async-effect foundation](EFFECTS.md) now supplies a tested
+integer dictionary/set service, an explicit coroutine runner, Lean model laws,
+and sampled Python/Lean trace checks. The normal runner includes these checks;
+their evidence explicitly marks container and async **lowering** unestablished.
+
+Connecting mutable-container semantics and async continuations to the compiler is next. Existing
 async/container-heavy code is not accepted unchanged yet. The Paxos learning
 implementation therefore retains its legacy generator until those stages pass.
