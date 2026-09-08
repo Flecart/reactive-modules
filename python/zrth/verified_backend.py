@@ -54,6 +54,18 @@ def candidate(s, env, next_):
             left, right = candidate(a, env, next_), candidate(b, env, next_)
             if len(left) != len(right): raise ValueError("return arity differs by branch")
             return [["ite", substitute(c, env), x, y] for x, y in zip(left, right)]
+        case ["call", targets, body]:
+            def no_return(_): raise ValueError("every helper path must return")
+            values = candidate(body, env, no_return)
+            if len(values) != len(targets): raise ValueError("helper return arity")
+            return next_({**env, **dict(zip(targets, values))})
+        case ["forEach", slots, rows, body]:
+            snapshot = [[substitute(v, env) for v in row] for row in rows]
+            def iteration(index, current):
+                if index == len(snapshot): return next_(current)
+                return candidate(body, {**current, **dict(zip(slots, snapshot[index]))},
+                                 lambda after: iteration(index + 1, after))
+            return iteration(0, env)
         case _: raise ValueError(f"invalid source: {s}")
 
 
@@ -68,7 +80,8 @@ def evaluate(e, env):
             return {"add": lambda: x + y, "sub": lambda: x - y, "eq": lambda: int(x == y),
                     "ne": lambda: int(x != y), "lt": lambda: int(x < y), "le": lambda: int(x <= y),
                     "gt": lambda: int(x > y), "ge": lambda: int(x >= y),
-                    "and": lambda: int(bool(x) and bool(y)), "or": lambda: int(bool(x) or bool(y))}[op]()
+                    "and": lambda: int(bool(x) and bool(y)), "or": lambda: int(bool(x) or bool(y)),
+                    "xor": lambda: int(bool(x) != bool(y))}[op]()
         case _: raise ValueError("unsupported graph operation")
 
 
@@ -79,7 +92,7 @@ def rm_graph(function):
     inputs = [zrth.Var((zrth.Bool if t == "bool" else zrth.Int)([1, 1])) for t in function["slots"][:function["inputs"]]]
     outputs = [zrth.Var((zrth.Bool if t == "bool" else zrth.Int)([1, 1])) for t in function["output_sorts"]]
     terms, cache = [], {}
-    op_names = dict(add="Add", sub="Sub", eq="Eq", ne="Ne", lt="Lt", le="Le", gt="Gt", ge="Ge", **{"and": "And", "or": "Or"})
+    op_names = dict(add="Add", sub="Sub", eq="Eq", ne="Ne", lt="Lt", le="Le", gt="Gt", ge="Ge", xor="Xor", **{"and": "And", "or": "Or"})
 
     def emit(e):
         key = json.dumps(e, separators=(",", ":"))
@@ -151,7 +164,7 @@ def lean_expr(e):
         case ["lit", n] if type(n) is int: return f"(.lit ({n}))"
         case ["boolean", b] if type(b) is bool: return f"(.boolean {str(b).lower()})"
         case ["var", n] if type(n) is int and n >= 0: return f"(.var {n})"
-        case ["bin", op, a, b] if op in {"add", "sub", "eq", "ne", "lt", "le", "gt", "ge", "and", "or"}:
+        case ["bin", op, a, b] if op in {"add", "sub", "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "xor"}:
             return f"(.bin .{op} {lean_expr(a)} {lean_expr(b)})"
         case ["not", a]: return f"(.not {lean_expr(a)})"
         case ["ite", c, a, b]: return f"(.ite {lean_expr(c)} {lean_expr(a)} {lean_expr(b)})"
@@ -165,6 +178,10 @@ def lean_source(s):
         case ["ret", values]: return f"(.ret {lean_list(map(lean_expr, values))})"
         case ["seq", a, b]: return f"(.seq {lean_source(a)} {lean_source(b)})"
         case ["branch", c, a, b]: return f"(.branch {lean_expr(c)} {lean_source(a)} {lean_source(b)})"
+        case ["call", targets, body]: return f"(.call {lean_list(map(str, targets))} {lean_source(body)})"
+        case ["forEach", slots, rows, body]:
+            values = lean_list(lean_list(map(lean_expr, row)) for row in rows)
+            return f"(.forEach {lean_list(map(str, slots))} {values} {lean_source(body)})"
         case _: raise ValueError("invalid source")
 
 

@@ -18,7 +18,7 @@ def Expr.sort (types : List ScalarSort) (initialized : List Nat) : Expr → Opti
     | .add | .sub => if sa == .int && sb == .int then some .int else none
     | .eq | .ne => if sa == sb then some .bool else none
     | .lt | .le | .gt | .ge => if sa == .int && sb == .int then some .bool else none
-    | .and | .or => if sa == .bool && sb == .bool then some .bool else none
+    | .and | .or | .xor => if sa == .bool && sb == .bool then some .bool else none
   | .ite c a b => do
     if c.sort types initialized != some .bool then none else do
       let sa ← a.sort types initialized
@@ -52,6 +52,16 @@ def checkSource (types outputs : List ScalarSort) (initialized : List Nat) :
     match result with
     | none => some none
     | some slots => checkSource types outputs slots b
+  | .call targets body => do
+    let results ← targets.mapM (fun n => types[n]?)
+    let state ← checkSource types results initialized body
+    if state == none then some (some (targets ++ initialized)) else none
+  | .forEach slots rows body => do
+    let expected ← slots.mapM (fun n => types[n]?)
+    let actual ← rows.mapM (fun row => row.mapM (Expr.sort types initialized))
+    if actual.any (fun sorts => sorts != expected) then none else do
+      let state ← checkSource types outputs (slots ++ initialized) body
+      if rows.isEmpty then some (some initialized) else some state
 
 def validSource (s : Source) (types outputs : List ScalarSort) (inputs : Nat) : Bool :=
   inputs ≤ types.length && checkSource types outputs (List.range inputs) s == some none

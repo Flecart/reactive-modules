@@ -4,7 +4,7 @@ namespace ReactiveModules
 
 /-- Mathematical integers; Boolean values have the representation 0/1. -/
 inductive Bin where
-  | add | sub | eq | ne | lt | le | gt | ge | and | or
+  | add | sub | eq | ne | lt | le | gt | ge | and | or | xor
   deriving Repr, DecidableEq
 
 def flag (p : Bool) : Int := if p then 1 else 0
@@ -20,6 +20,7 @@ def Bin.eval : Bin → Int → Int → Int
   | .ge, a, b => flag (a ≥ b)
   | .and, a, b => flag (a != 0 && b != 0)
   | .or, a, b => flag (a != 0 || b != 0)
+  | .xor, a, b => flag ((a != 0) != (b != 0))
 
 inductive Expr where
   | lit (value : Int)
@@ -57,6 +58,15 @@ def updateMany (env : Nat → α) : List Nat → List α → Nat → α
   | n :: ns, v :: vs => updateMany (update env n v) ns vs
   | _, _ => env
 
+/-- Iterate over a snapshot of a fixed tuple. A return in the body discards
+    the remaining iterations, just as it discards any other continuation. -/
+def each (body : (Nat → α) → ((Nat → α) → Nat → α) → Nat → α)
+    (slots : List Nat) (rows : List (List α)) (env : Nat → α)
+    (next : (Nat → α) → Nat → α) : Nat → α :=
+  match rows with
+  | [] => next env
+  | row :: rest => body (updateMany env slots row) (fun env' => each body slots rest env' next)
+
 theorem eval_updateMany (env : Nat → Expr) (inputs : Nat → Int)
     (slots : List Nat) (values : List Expr) :
     (fun i => (updateMany env slots values i).eval inputs) =
@@ -81,6 +91,8 @@ inductive Source where
   | ret (values : List Expr)
   | branch (condition : Expr) (yes no : Source)
   | seq (first rest : Source)
+  | call (targets : List Nat) (body : Source)
+  | forEach (slots : List Nat) (rows : List (List Expr)) (body : Source)
   deriving Repr, DecidableEq
 
 /-- Continuation semantics: return discards the continuation, assignment does not.
@@ -92,6 +104,11 @@ def Source.exec (env : Nat → Int) (next : (Nat → Int) → Nat → Int) : Sou
   | .ret values => fun i => (values[i]?.getD (.lit 0)).eval env
   | .branch c a b => if c.eval env != 0 then a.exec env next else b.exec env next
   | .seq a b => a.exec env (fun env' => b.exec env' next)
+  | .call targets body =>
+      next (updateMany env targets ((List.range targets.length).map (body.exec env id)))
+  | .forEach slots rows body =>
+      each (fun env next => body.exec env next) slots
+        (rows.map (fun row => row.map (Expr.eval env))) env next
 
 /-- Canonical lowering: eliminate locals, sequencing and return into RM expressions.
     This definition, not the Python candidate emitter, is the reference compiler. -/
@@ -102,6 +119,11 @@ def Source.lower (env : Nat → Expr) (next : (Nat → Expr) → Nat → Expr) :
   | .ret values => fun i => (values[i]?.getD (.lit 0)).subst env
   | .branch c a b => fun i => .ite (c.subst env) (a.lower env next i) (b.lower env next i)
   | .seq a b => a.lower env (fun env' => b.lower env' next)
+  | .call targets body =>
+      next (updateMany env targets ((List.range targets.length).map (body.lower env id)))
+  | .forEach slots rows body =>
+      each (fun env next => body.lower env next) slots
+        (rows.map (fun row => row.map (Expr.subst env))) env next
 
 theorem eval_update (env : Nat → Expr) (inputs : Nat → Int) (n : Nat) (e : Expr) :
     (fun i => (update env n (e.subst env) i).eval inputs) =
@@ -129,6 +151,28 @@ theorem Source.lower_correct (s : Source) (env : Nat → Expr) (inputs : Nat →
   | seq a b ha hb =>
     exact ha env (fun e => b.lower e next) (fun e => b.exec e cont)
       (fun e j => hb e next cont h j) i
+  | call targets body ih =>
+    simp only [lower, exec]
+    rw [h, eval_updateMany, List.map_map]
+    congr 2
+    apply List.map_congr_left
+    intro j _
+    exact ih env id id (fun _ _ => rfl) j
+  | forEach slots rows body ih =>
+    have loop (rs : List (List Expr)) (e : Nat → Expr) :
+        (each (fun env next => body.lower env next) slots rs e next i).eval inputs =
+        each (fun env next => body.exec env next) slots
+          (rs.map (fun row => row.map (Expr.eval inputs)))
+          (fun n => (e n).eval inputs) cont i := by
+      induction rs generalizing e i with
+      | nil => exact h e i
+      | cons row rest hr =>
+        simp only [each, List.map_cons]
+        rw [ih _ _ (fun env => each (fun env next => body.exec env next) slots
+          (rest.map (fun row => row.map (Expr.eval inputs))) env cont)
+          (fun e j => hr (e := e) (i := j)), eval_updateMany]
+    simpa only [lower, exec, List.map_map, Function.comp_def, Expr.subst_correct] using
+      loop (rows.map (fun row => row.map (Expr.subst env))) env
 
 def Source.compiled (s : Source) (outputs : Nat) : List Expr :=
   (List.range outputs).map (s.lower Expr.var id)

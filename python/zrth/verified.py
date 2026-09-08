@@ -39,6 +39,8 @@ class Type:
         if self.optional:
             return [0] + [0] * len(self.optional.sorts) if value is None else [1] + self.optional.encode(value)
         if self.fields:
+            if self.name == "tuple" and (type(value) is not tuple or len(value) != len(self.fields)):
+                raise TypeError(f"expected exact tuple of length {len(self.fields)}")
             result = []
             for name, field in self.fields:
                 item = value[int(name)] if self.name == "tuple" else getattr(value, name)
@@ -54,6 +56,7 @@ class Type:
 
 
 INT, BOOL = Type("int"), Type("bool")
+BUILTINS = {"tuple", "Enum", "dataclass", "len"}
 
 
 @dataclasses.dataclass
@@ -87,7 +90,7 @@ class Parser:
             elif isinstance(node, ast.ClassDef):
                 self.record(node, imports)
             elif isinstance(node, ast.FunctionDef):
-                if node.name in self.functions or node.name in self.types or node.name in {"tuple", "Enum", "dataclass"}:
+                if node.name in self.functions or node.name in self.types or node.name in BUILTINS:
                     self.fail(node, "duplicate or shadowing declaration")
                 if node.decorator_list or node.args.defaults or node.args.kw_defaults:
                     self.fail(node, "decorators and function defaults may execute code at module load")
@@ -114,11 +117,13 @@ class Parser:
                 return Type(inner.name + " | None", optional=inner)
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "tuple":
             items = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            if not items:
+                self.fail(node, "empty tuple schemas are unsupported")
             return Type("tuple", tuple((str(i), self.annotation(t)) for i, t in enumerate(items)))
         self.fail(node, "expected int, bool, declared immutable record/enum, optional, or fixed tuple type")
 
     def record(self, node, imports):
-        if node.name in self.types or node.name in self.functions or node.name in {"tuple", "Enum", "dataclass"} or node.keywords:
+        if node.name in self.types or node.name in self.functions or node.name in BUILTINS or node.keywords:
             self.fail(node, "duplicate or unsupported class declaration")
         body = [n for n in node.body if not self.docstring(n)]
         if len(node.bases) == 1 and isinstance(node.bases[0], ast.Name) and node.bases[0].id == "Enum":
@@ -160,13 +165,13 @@ class Parser:
         if name not in self.functions:
             raise UnsupportedPython(f"no function {name!r} in {self.filename}")
         self.fn = self.functions[name]
+        self.check_signature(self.fn)
         args = self.fn.args
-        if self.fn.decorator_list or args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg or args.defaults:
-            self.fail(self.fn, "entrypoints require undecorated, annotated positional parameters without defaults")
         self.bindings, self.slots, self.parameters = {}, [], []
+        self.pending, self.call_stack = [], [name]
         for arg in args.args:
             typ = self.annotation(arg.annotation)
-            if arg.arg in self.bindings or arg.arg in self.types:
+            if arg.arg in self.bindings or self.reserved(arg.arg):
                 self.fail(arg, "duplicate parameter or type-name shadowing")
             self.bindings[arg.arg] = self.allocate(typ)
             self.parameters.append((arg.arg, typ))
@@ -175,6 +180,77 @@ class Parser:
         program = self.block(self.fn.body, set())
         return dict(name=name, source=program, slots=list(self.slots), inputs=input_count,
                     output_sorts=self.output.sorts, parameters=self.parameters, output_type=self.output)
+
+    def reserved(self, name):
+        return name in self.types or name in self.functions or name in BUILTINS
+
+    def check_signature(self, fn):
+        args = fn.args
+        if fn.decorator_list or args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg or args.defaults:
+            self.fail(fn, "functions require undecorated, annotated positional parameters without defaults")
+
+    def capture(self, node, narrowed, expected=None):
+        """Keep expression-local calls inside their short-circuiting branch."""
+        outer, self.pending = self.pending, []
+        try:
+            value = self.expression(node, narrowed, expected)
+            return value, self.pending
+        finally:
+            self.pending = outer
+
+    @staticmethod
+    def assignment(binding, value):
+        return ["assignMany", [e[1] for e in binding.terms], value.terms]
+
+    def helper(self, node, narrowed):
+        name = node.func.id
+        if name in self.call_stack:
+            self.fail(node, "recursive helper calls are unsupported: " + " -> ".join(self.call_stack + [name]))
+        fn = self.functions[name]
+        self.check_signature(fn)
+        params = fn.args.args
+        if len(node.args) > len(params):
+            self.fail(node, "too many helper arguments")
+        supplied = {}
+        for param, arg in zip(params, node.args):
+            typ = self.annotation(param.annotation)
+            supplied[param.arg] = self.coerce(self.expression(arg, narrowed, typ), typ, arg)
+        for kw in node.keywords:
+            param = next((p for p in params if p.arg == kw.arg), None)
+            if param is None or kw.arg in supplied:
+                self.fail(kw, "unknown, unpacked, or duplicate helper argument")
+            typ = self.annotation(param.annotation)
+            supplied[kw.arg] = self.coerce(self.expression(kw.value, narrowed, typ), typ, kw.value)
+        if len(supplied) != len(params):
+            self.fail(node, "all helper arguments must be supplied")
+        saved = self.fn, self.bindings, self.output
+        self.fn, self.bindings, self.output = fn, {}, self.annotation(fn.returns)
+        self.call_stack.append(name)
+        try:
+            assignments = []
+            for param in params:
+                if param.arg in self.bindings or self.reserved(param.arg):
+                    self.fail(param, "duplicate parameter or reserved-name shadowing")
+                binding = self.allocate(self.annotation(param.annotation))
+                self.bindings[param.arg] = binding
+                assignments.append(self.assignment(binding, supplied[param.arg]))
+            body = self.block(fn.body, set())
+            result = self.allocate(self.output)
+            self.pending.append(["call", [e[1] for e in result.terms], seq(assignments + [body])])
+            return result
+        finally:
+            self.fn, self.bindings, self.output = saved
+            self.call_stack.pop()
+
+    def tuple_values(self, value, node):
+        if value.type.name != "tuple":
+            self.fail(node, "expected a fixed tuple")
+        result, offset = [], 0
+        for _, typ in value.type.fields:
+            width = len(typ.sorts)
+            result.append(Value(typ, value.terms[offset:offset + width]))
+            offset += width
+        return result
 
     def allocate(self, typ):
         first = len(self.slots)
@@ -221,11 +297,36 @@ class Parser:
                     return Value(typ, parent.terms[start:start + len(typ.sorts)])
                 start += len(typ.sorts)
         elif isinstance(node, ast.Tuple):
+            if not node.elts:
+                self.fail(node, "empty tuples are unsupported")
             expected_fields = expected.fields if expected and expected.name == "tuple" else ()
             values = [self.coerce(self.expression(n, narrowed, expected_fields[i][1] if i < len(expected_fields) else None),
                                   expected_fields[i][1], n) if i < len(expected_fields) else self.expression(n, narrowed)
                       for i, n in enumerate(node.elts)]
             return Value(Type("tuple", tuple((str(i), v.type) for i, v in enumerate(values))), [e for v in values for e in v.terms])
+        elif isinstance(node, ast.Subscript):
+            values = self.tuple_values(self.expression(node.value, narrowed), node.value)
+            index = node.slice
+            sign = 1
+            if isinstance(index, ast.UnaryOp) and isinstance(index.op, ast.USub):
+                index, sign = index.operand, -1
+            if not isinstance(index, ast.Constant) or type(index.value) is not int:
+                self.fail(node.slice, "tuple indices must be integer literals")
+            position = sign * index.value
+            if not -len(values) <= position < len(values):
+                self.fail(node.slice, "tuple index out of range")
+            return values[position]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self.functions:
+            return self.helper(node, narrowed)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len":
+            if len(node.args) != 1 or node.keywords:
+                self.fail(node, "len requires one fixed-tuple argument")
+            value = self.expression(node.args[0], narrowed)
+            values = self.tuple_values(value, node.args[0])
+            # Python evaluates the argument even though its length is static.
+            # Keep that read in Source so definite initialization is checked.
+            self.pending.append(self.assignment(self.allocate(value.type), value))
+            return Value(INT, [["lit", len(values)]])
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self.types:
             typ = self.types[node.func.id]
             if not typ.fields or typ.name == "tuple" or len(node.args) > len(typ.fields):
@@ -250,17 +351,26 @@ class Parser:
             if a.type == b.type == INT:
                 return Value(INT, [["bin", "add" if isinstance(node.op, ast.Add) else "sub", a.terms[0], b.terms[0]]])
         elif isinstance(node, ast.BoolOp):
-            terms, context = [], set(narrowed)
+            result, context = None, set(narrowed)
+            is_and = isinstance(node.op, ast.And)
             for value in node.values:
-                parsed = self.expression(value, context)
+                parsed, prefix = self.capture(value, context)
                 if parsed.type != BOOL:
                     self.fail(value, "and/or require Boolean operands")
-                terms.append(parsed.terms[0])
-                context |= self.refinement(value, isinstance(node.op, ast.And))
-            result = terms[-1]
-            for term in reversed(terms[:-1]):
-                result = ["bin", "and" if isinstance(node.op, ast.And) else "or", term, result]
-            return Value(BOOL, [result])
+                if result is None:
+                    self.pending.extend(prefix)
+                    result = parsed
+                elif prefix:
+                    selected = self.allocate(BOOL)
+                    branch = seq(prefix + [self.assignment(selected, parsed)])
+                    short = self.assignment(selected, Value(BOOL, [["boolean", not is_and]]))
+                    self.pending.append(["branch", result.terms[0], branch if is_and else short,
+                                         short if is_and else branch])
+                    result = selected
+                else:
+                    result = Value(BOOL, [["bin", "and" if is_and else "or", result.terms[0], parsed.terms[0]]])
+                context |= self.refinement(value, is_and)
+            return result
         elif isinstance(node, ast.Compare) and len(node.ops) == 1:
             a = self.expression(node.left, narrowed)
             other = node.comparators[0]
@@ -272,14 +382,24 @@ class Parser:
             if op and a.type == b.type and not a.type.fields and not a.type.optional:
                 if op not in ("eq", "ne") and a.type != INT:
                     self.fail(node, "ordering comparisons require integers")
+                if a.type == BOOL:
+                    different = ["bin", "xor", a.terms[0], b.terms[0]]
+                    return Value(BOOL, [different if op == "ne" else ["not", different]])
                 return Value(BOOL, [["bin", op, a.terms[0], b.terms[0]]])
         elif isinstance(node, ast.IfExp):
             c = self.expression(node.test, narrowed)
             if c.type != BOOL:
                 self.fail(node.test, "conditions must be Boolean")
-            a = self.expression(node.body, narrowed | self.refinement(node.test, True), expected)
-            b = self.expression(node.orelse, narrowed | self.refinement(node.test, False), expected)
+            a, yes = self.capture(node.body, narrowed | self.refinement(node.test, True), expected)
+            b, no = self.capture(node.orelse, narrowed | self.refinement(node.test, False), expected)
+            if expected:
+                a, b = self.coerce(a, expected, node.body), self.coerce(b, expected, node.orelse)
             if a.type == b.type:
+                if yes or no:
+                    selected = self.allocate(a.type)
+                    self.pending.append(["branch", c.terms[0], seq(yes + [self.assignment(selected, a)]),
+                                         seq(no + [self.assignment(selected, b)])])
+                    return selected
                 return Value(a.type, [["ite", c.terms[0], x, y] for x, y in zip(a.terms, b.terms)])
         self.fail(node, "unsupported expression, unsafe access, or incompatible operand types")
 
@@ -293,40 +413,76 @@ class Parser:
     def block(self, body, narrowed):
         statements = []
         for node in body:
-            if self.docstring(node) or isinstance(node, ast.Pass):
-                continue
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                if isinstance(node, ast.Assign) and len(node.targets) != 1:
-                    self.fail(node, "chained assignments are unsupported")
-                target = node.target if isinstance(node, ast.AnnAssign) else node.targets[0]
-                if not isinstance(target, ast.Name) or target.id in self.types:
-                    self.fail(target, "only local name assignment is supported; records are immutable")
-                expected = self.annotation(node.annotation) if isinstance(node, ast.AnnAssign) else (
-                    self.bindings[target.id].type if target.id in self.bindings else None)
-                value = self.expression(node.value, narrowed, expected)
-                if expected:
-                    value = self.coerce(value, expected, node)
-                if target.id not in self.bindings:
-                    self.bindings[target.id] = self.allocate(value.type)
-                binding = self.bindings[target.id]
-                self.coerce(value, binding.type, node)
-                statements.append(["assignMany", [e[1] for e in binding.terms], value.terms])
-                narrowed = {p for p in narrowed if p != target.id and not p.startswith(target.id + ".")}
-            elif isinstance(node, ast.If):
-                condition = self.expression(node.test, narrowed)
-                if condition.type != BOOL:
-                    self.fail(node.test, "conditions must be Boolean")
-                statements.append(["branch", condition.terms[0],
-                    self.block(node.body, narrowed | self.refinement(node.test, True)),
-                    self.block(node.orelse, narrowed | self.refinement(node.test, False))])
-                # Do not carry speculative optional refinements beyond a branch.
-                narrowed = set()
-            elif isinstance(node, ast.Return):
-                result = self.coerce(self.expression(node.value, narrowed, self.output), self.output, node)
-                statements.append(["ret", result.terms])
-            else:
-                self.fail(node, "unsupported statement (including effects, loops, async, exceptions and mutation)")
+            outer, self.pending = self.pending, []
+            try:
+                statement, narrowed = self.statement(node, narrowed)
+                statements.extend(self.pending)
+                statements.append(statement)
+            finally:
+                self.pending = outer
         return seq(statements)
+
+    def bind_target(self, target, value):
+        if isinstance(target, (ast.Tuple, ast.List)):
+            values = self.tuple_values(value, target)
+            if len(values) != len(target.elts):
+                self.fail(target, "tuple unpacking arity mismatch")
+            slots, terms = [], []
+            for child, item in zip(target.elts, values):
+                child_slots, child_terms = self.bind_target(child, item)
+                slots.extend(child_slots)
+                terms.extend(child_terms)
+            return slots, terms
+        if not isinstance(target, ast.Name) or self.reserved(target.id):
+            self.fail(target, "only local name/tuple assignment is supported; records are immutable")
+        if target.id not in self.bindings:
+            self.bindings[target.id] = self.allocate(value.type)
+        binding = self.bindings[target.id]
+        value = self.coerce(value, binding.type, target)
+        return [e[1] for e in binding.terms], value.terms
+
+    def statement(self, node, narrowed):
+        if self.docstring(node) or isinstance(node, ast.Pass):
+            return ["skip"], narrowed
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if isinstance(node, ast.Assign) and len(node.targets) != 1:
+                self.fail(node, "chained assignments are unsupported")
+            target = node.target if isinstance(node, ast.AnnAssign) else node.targets[0]
+            if isinstance(node, ast.AnnAssign) and not isinstance(target, ast.Name):
+                self.fail(target, "annotated assignment requires a local name")
+            expected = self.annotation(node.annotation) if isinstance(node, ast.AnnAssign) else (
+                self.bindings[target.id].type if isinstance(target, ast.Name) and target.id in self.bindings else None)
+            value = self.expression(node.value, narrowed, expected)
+            if expected:
+                value = self.coerce(value, expected, node)
+            slots, terms = self.bind_target(target, value)
+            names = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+            narrowed = {p for p in narrowed if p.split(".")[0] not in names}
+            return ["assignMany", slots, terms], narrowed
+        elif isinstance(node, ast.If):
+            condition = self.expression(node.test, narrowed)
+            if condition.type != BOOL:
+                self.fail(node.test, "conditions must be Boolean")
+            result = ["branch", condition.terms[0],
+                self.block(node.body, narrowed | self.refinement(node.test, True)),
+                self.block(node.orelse, narrowed | self.refinement(node.test, False))]
+            # Do not carry speculative optional refinements beyond a branch.
+            return result, set()
+        elif isinstance(node, ast.For):
+            values = self.tuple_values(self.expression(node.iter, narrowed), node.iter)
+            if not values or any(v.type != values[0].type for v in values):
+                self.fail(node.iter, "for requires a nonempty, homogeneous fixed tuple")
+            bindings = [self.bind_target(node.target, value) for value in values]
+            slots = bindings[0][0]
+            # A loop can change a narrowed optional before the next iteration.
+            body = self.block(node.body, set())
+            loop = ["forEach", slots, [terms for _, terms in bindings], body]
+            return seq([loop, self.block(node.orelse, set())]), set()
+        elif isinstance(node, ast.Return):
+            result = self.coerce(self.expression(node.value, narrowed, self.output), self.output, node)
+            return ["ret", result.terms], narrowed
+        else:
+            self.fail(node, "unsupported statement (including effects, dynamic loops, async, exceptions and mutation)")
 
 
 def compile_module(source, entrypoints, model_config=None):

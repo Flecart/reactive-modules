@@ -1,6 +1,6 @@
 # Checked Python libraries
 
-The first supported-subset release compiles ordinary typed Python handlers into
+The supported-subset compiler compiles ordinary typed Python handlers into
 actual RM update graphs and checks translation certificates and library contracts
 in Lean. There is no per-algorithm source generator. The permissive analyzer is
 unchanged; the new API is `zrth.verified`.
@@ -53,19 +53,34 @@ next invocation and executes communication requests outside the handler.
 - Types: exact Python `int`/`bool`, distinct integer-valued enums, nested frozen
   records, fixed tuples, and optional values. Optional record access requires
   an explicit `is not None` branch.
-- Statements: local/record rebinding, branches, early returns, and pass.
-  Every entrypoint path must return. Record assignments evaluate all right-hand
-  sides before rebinding any fields.
+- Statements: local/record rebinding, nested tuple unpacking, branches, early
+  returns, and pass. Every entrypoint and helper path must return. Assignments
+  evaluate all right-hand sides before rebinding targets, left to right.
+- Helpers: annotated, nonrecursive functions in the same module, with positional
+  or keyword arguments. Nested calls have isolated local scopes. Calls in
+  `and`/`or` and conditional expressions retain their short-circuit branches.
+- Tuples: literal indexing (including negative indices), `len`, and `for` over
+  nonempty homogeneous fixed tuples. Nested loops, unpacked loop targets, early
+  returns, and `for ... else` are supported. Iteration uses the original tuple
+  even when its variable is rebound inside the loop. No `break`/`continue` yet.
 - Expressions: Boolean operations, comparisons, addition/subtraction, conditional
   expressions, and record construction. Numeric truthiness is rejected.
 - Records have explicit fields without defaults, inheritance, methods, special
   fields, or custom decorators. Parameter values must satisfy declared schemas.
 
-Mutable collections, loops, helper calls, dynamic dispatch, exceptions, async,
-and arbitrary imports/effects are rejected—not silently abstracted. The RM
+Mutable/dynamically sized collections, dynamic loops, recursion, imported or
+higher-order calls, dynamic dispatch, exceptions, async, and arbitrary
+imports/effects are rejected—not silently abstracted. Empty tuples and dynamic
+tuple indices are also currently rejected. The RM
 adapter currently accepts literal operands representable in signed 64 bits,
 but variable values and arithmetic are unbounded mathematical integers.
 Tensor execution and its overflow behavior are not the certified semantics.
+
+`examples/fold_register.py` demonstrates a helper called inside an ordinary
+Python loop. A fixed tuple's length comes from its source type, not from a
+model-checking cutoff: every iteration is included. The lowering theorem covers
+arbitrary finite row lists, but each generated RM graph has the concrete tuple
+layout declared by that Python function. This is not unbounded-container support.
 
 ## Checked connection and trust boundary
 
@@ -80,6 +95,10 @@ Python bytes → trusted parser/schema resolution/fixed record layout → source
 connects wire execution to the source-style representation of that graph.
 `certified_correct` connects each checked RM graph to its source AST. The final
 graph is checked, not just its hash or the candidate compiler's output label.
+Helper calls and tuple loops remain explicit `Source.call` / `Source.forEach`
+nodes in certificates. Their scoped-return and snapshot-iteration semantics are
+included in the generic `Source.lower_correct` proof; the trusted Python parser
+does not erase calls/loops into an unchecked per-algorithm rewrite.
 
 **The parser/schema elaborator and correspondence between this declared subset
 and the Python runtime remain trusted.** This is not a mechanized proof of
@@ -107,6 +126,7 @@ still be reviewed: compilation cannot infer the author's intention.
 | Example | Checked result |
 | --- | --- |
 | Register | Result is at least the previous and offered values, and is one of them, for every integer input. |
+| Fold register | A helper-in-loop implementation never decreases and covers all three offered values, for every integer input. |
 | Channel safety | Received values form a prefix of accepted values; request IDs are delivered at most once; completion never precedes delivery. |
 | Channel liveness | Every pending/accepted request completes under infinitely-often ticks and fair loss in both directions. |
 | Non-vacuity | An actual request is accepted, delivered, and acknowledged, followed by an infinite fair execution. |
