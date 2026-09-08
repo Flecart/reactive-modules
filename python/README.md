@@ -1,5 +1,42 @@
 # Accessing and creating reactive modules from Python
 
+## Strict scalar Python compilation
+
+`zrth.analyzer.convert_method(..., strict=True)` opts into a fail-closed scalar
+frontend. The default remains permissive for existing delegated environments.
+Strict mode validates the original AST before early-return normalization and
+reports unsupported behavior with its source filename, line, and column.
+
+The supported statement forms are assignments (including annotated and
+augmented assignments), conditionals, returns, pass, and docstrings. Expressions
+may use declared scalar state/input wires, numeric/Boolean constants, supported
+arithmetic and comparisons, Boolean operators, conditional expressions, and
+two-argument `min`/`max`. Conditions and Boolean operands must be Boolean;
+implicit numeric truthiness is rejected. Annotations do not replace the wire
+sort declarations supplied to `convert_method`.
+
+Loops, async methods, container mutation, exceptions, effectful expression
+statements, helper calls, and unknown calls are rejected rather than silently
+skipped or represented by uninterpreted placeholders. Strict mode is a supported
+language boundary, not a proof of compiler correctness or unrestricted Python
+semantics; the selected RM theory and declared sorts still govern arithmetic.
+
+```python
+from zrth import Var, Int, LIATermBuilder
+from zrth.analyzer import convert_method
+
+class Counter:
+    def step(self, increment):
+        self.count = self.count + increment
+
+wires = {name: Var(Int([1, 1])) for name in ("count", "increment")}
+terms = convert_method(Counter.step, wires, [],
+                       builder=LIATermBuilder(), strict=True)
+```
+
+The method must have inspectable Python source (for example, in a `.py` file).
+No source-specific rewrite is needed for programs in this subset.
+
 ## Setup
 
 Install [uv](https://github.com/astral-sh/uv) and run `just py-rebuild`
@@ -96,4 +133,3 @@ maturin develop --features enable-torch,enable-smt
 # run a test
 python tests/test.py
 ```
-

@@ -1384,6 +1384,7 @@ class MethodVisitor(ast.NodeVisitor):
             live_layers: dict | None = None,
             builder: TermBuilder | None = None,
             static_attrs: dict[str, Any] | None = None,
+            strict: bool = False,
     ):
         self.wire_pairs = wire_pairs
         self.result_wires = result_wires
@@ -1392,6 +1393,7 @@ class MethodVisitor(ast.NodeVisitor):
         self.params = params or {}
         self.live_layers = live_layers or {}
         self.static_attrs = static_attrs or {}
+        self.strict = strict
         self.terms = []
         self.temp_vars = {}
         self.scopes = []
@@ -1422,6 +1424,7 @@ class MethodVisitor(ast.NodeVisitor):
     def visit_If(self, node):
         """Handle if/else with SSA: evaluate both branches, merge with Ite."""
         cond_wire = self._convert_expr(node.test)
+        self._strict_boolean(cond_wire)
 
         # If cond is a compile-time constant, take just the chosen branch
         if isinstance(cond_wire, _StaticValue):
@@ -1558,6 +1561,17 @@ class MethodVisitor(ast.NodeVisitor):
                 term = self.builder.id_(result_val, output_wire=output_wire)
                 self.terms.append(term)
                 self.written_wires.add(wire_name)
+
+    def visit_AnnAssign(self, node):
+        if node.value is None:
+            return
+        assignment = ast.copy_location(
+            ast.Assign(targets=[node.target], value=node.value), node)
+        self.visit_Assign(assignment)
+
+    def _strict_boolean(self, value):
+        if self.strict and not isinstance(self._d(value), Bool):
+            raise ValueError("strict mode requires Boolean conditions/operands; compare explicitly")
 
     def visit_AugAssign(self, node):
         """Handle augmented assignment (+=, -=, *=, /=). Desugar to regular assignment
@@ -1907,6 +1921,7 @@ class MethodVisitor(ast.NodeVisitor):
         if op_type == ast.Not:
             # not x -> Ite(x, False, True) - always Bool
             operand_val = self._convert_expr(unaryop.operand)
+            self._strict_boolean(operand_val)
             false_term = self._emit_const_bool(False)
             true_term = self._emit_const_bool(True)
             ite_term = self.builder.ite(operand_val, false_term, true_term)
@@ -1945,6 +1960,8 @@ class MethodVisitor(ast.NodeVisitor):
             raise ValueError("BoolOp must have at least 2 operands")
 
         vals = [self._convert_expr(val) for val in boolop.values]
+        for value in vals:
+            self._strict_boolean(value)
         is_and = isinstance(boolop.op, ast.And)
 
         if not is_and and not isinstance(boolop.op, ast.Or):
@@ -2022,6 +2039,7 @@ class MethodVisitor(ast.NodeVisitor):
         Propagates target_dtype to both branches (e.g., self.x = 5 if c else 10 -> both Int)
         """
         cond_val = self._convert_expr(ifexp.test)
+        self._strict_boolean(cond_val)
         true_val = self._convert_expr(ifexp.body, target_dtype=target_dtype)
         false_val = self._convert_expr(ifexp.orelse, target_dtype=target_dtype)
 
@@ -2152,6 +2170,7 @@ def convert_method(
         builder: TermBuilder | None = None,
         theory=None,
         static_attrs: dict[str, Any] | None = None,
+        strict: bool = False,
 ) -> list[Term]:
     """Convert a Python method to a list of Terms.
 
@@ -2166,6 +2185,9 @@ def convert_method(
         builder: Optional TermBuilder instance; if provided takes precedence over theory
         theory: IType.LRA (default), IType.LIA, or IType.BV — selects the term builder
                 (ignored if builder is provided)
+        strict: Reject unsupported statements/calls before conversion. This mode
+                supports scalar expressions, assignments, branches, and returns;
+                it never intentionally skips effects or emits unknown-call placeholders.
 
     Returns:
         List of Terms representing the method as a reactive diagram
@@ -2177,6 +2199,14 @@ def convert_method(
 
     source = textwrap.dedent(inspect.getsource(method))
     func_def = ast.parse(source).body[0]
+    if strict:
+        from .strict import ScalarValidator, StrictPythonError
+        from .builder import _shape
+        filename = inspect.getsourcefile(method) or "<python>"
+        first_line = inspect.getsourcelines(method)[1]
+        if any(_shape(wire.dtype) != [1, 1] for wire in wires.values()):
+            raise StrictPythonError("strict scalar mode requires [1, 1] wire shapes", func_def, filename, first_line)
+        ScalarValidator(wires, filename, first_line).visit(func_def)
     if not isinstance(func_def, ast.FunctionDef):
         raise ValueError(f"Expected function definition, got {type(func_def).__name__}")
 
@@ -2193,13 +2223,19 @@ def convert_method(
         live_layers=live_layers,
         builder=builder,
         static_attrs=static_attrs,
+        strict=strict,
     )
     visitor.temp_vars.update(
         {name: wires[name] for name in param_names if name in wires}
     )
 
     for stmt in func_def.body:
-        visitor.visit(stmt)
+        try:
+            visitor.visit(stmt)
+        except (ValueError, TypeError, NotImplementedError) as exc:
+            if strict:
+                raise StrictPythonError(str(exc), stmt, filename, first_line) from exc
+            raise
 
     for i, result_wire in enumerate(result):
         src = visitor.temp_vars.get(f"_ret_{i}")
