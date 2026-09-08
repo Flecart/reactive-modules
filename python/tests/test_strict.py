@@ -132,3 +132,37 @@ def test_untaken_assignments_hold_state(cls, value):
     expected.x = 7
     expected.step(value)
     assert actual[X(wires["x"])].item() == expected.x
+
+
+def test_shadowed_builtin_is_not_compiled_as_the_real_builtin():
+    min = lambda a, b: a + b
+
+    def step(self, value):
+        self.x = min(self.x, value)
+
+    wires = {name: Var(Int([1, 1])) for name in ("x", "value")}
+    with pytest.raises(StrictPythonError, match="shadowed builtin call"):
+        convert_method(step, wires, [], builder=LIATermBuilder(), strict=True)
+
+
+class Fractional:
+    def step(self):
+        self.x = 1.5
+
+
+def test_fractional_literal_is_not_truncated_into_integer_state():
+    with pytest.raises(StrictPythonError, match="truncated"):
+        convert_method(Fractional.step, {"x": Var(Int([1, 1]))}, [], builder=LIATermBuilder(), strict=True)
+
+
+class LiteralLocal:
+    def step(self):
+        amount = 3
+        self.x = self.x + amount
+
+
+def test_integer_local_literal_uses_selected_theory():
+    wires = {"x": Var(Int([1, 1]))}
+    terms = convert_method(LiteralLocal.step, wires, [], builder=LIATermBuilder(), strict=True)
+    result = evaluate(terms, {wires["x"]: torch.tensor([[4]])})
+    assert result[X(wires["x"])].item() == 7

@@ -2065,7 +2065,10 @@ class MethodVisitor(ast.NodeVisitor):
             return term
         elif isinstance(value, (int, float)):
             if target_dtype is None:
-                target_dtype = Real([1, 1])
+                target_dtype = (self.builder.python_type_to_dtype(type(value), [1, 1])
+                                if self.strict else Real([1, 1]))
+            if self.strict and isinstance(value, float) and isinstance(target_dtype, (Int, BitVec)):
+                raise ValueError("floating-point constants cannot be silently truncated to integers")
             tensor_data = torch.tensor([value], dtype=_torch_dtype(target_dtype))
             term = self.builder.const(tensor_data)
             self.terms.append(term)
@@ -2200,6 +2203,7 @@ def convert_method(
     source = textwrap.dedent(inspect.getsource(method))
     func_def = ast.parse(source).body[0]
     if strict:
+        import builtins
         from .strict import ScalarValidator, StrictPythonError
         from .builder import _shape
         filename = inspect.getsourcefile(method) or "<python>"
@@ -2207,6 +2211,13 @@ def convert_method(
         if any(_shape(wire.dtype) != [1, 1] for wire in wires.values()):
             raise StrictPythonError("strict scalar mode requires [1, 1] wire shapes", func_def, filename, first_line)
         ScalarValidator(wires, filename, first_line).visit(func_def)
+        closure = inspect.getclosurevars(method)
+        for call in ast.walk(func_def):
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                name = call.func.id
+                resolved = closure.nonlocals.get(name, closure.globals.get(name, closure.builtins.get(name)))
+                if resolved is not getattr(builtins, name):
+                    raise StrictPythonError(f"shadowed builtin call: {name}", call, filename, first_line)
     if not isinstance(func_def, ast.FunctionDef):
         raise ValueError(f"Expected function definition, got {type(func_def).__name__}")
 
