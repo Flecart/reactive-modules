@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from zrth import LRA, LIA, Real, Int, Wire
+from zrth import LRA, LIA, Real, Int, Bool, Wire, LIATermBuilder
 from zrth.builder import builder_for
 from zrth.eval import eval_itype
 
@@ -23,3 +23,11 @@ def test_mul_scales_a_column_vector(theory, sort, dtype, n):
     vals = torch.arange(1, n + 1, dtype=dtype).reshape(n, 1)
     out = eval_itype(term.itype, [vals], term.write[0].dtype)[0]
     assert out.flatten().tolist() == [3 * v for v in range(1, n + 1)]
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_lia_boolean_constant_with_explicit_output(value):
+    output = Wire(Bool([1, 1]))
+    term = LIATermBuilder().const(torch.tensor(value), output_wire=output)
+    assert term.write[0] == output
+    assert eval_itype(term.itype, [], output.dtype)[0].item() is value
