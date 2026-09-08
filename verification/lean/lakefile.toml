@@ -1,0 +1,11 @@
+name = "reactiveModulesVerification"
+version = "0.1.0"
+defaultTargets = ["ReactiveModules"]
+
+[[require]]
+name = "cslib"
+git = "https://github.com/leanprover/cslib.git"
+rev = "d0c137a2e65bb13d906be55bcde4fecaa7972c0b"
+
+[[lean_lib]]
+name = "ReactiveModules"

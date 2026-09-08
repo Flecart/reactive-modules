@@ -1,0 +1,38 @@
+name: Checked Python libraries
+
+on:
+  push:
+    branches: [main, feat/strict-python-frontend]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: extractions/setup-just@v2
+      - run: just py-build
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: verification/lean
+          auto-config: false
+          build: true
+      - name: Verify source translations, library theorems, and negative cases
+        run: uv run python verification/check.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-evidence
+          path: verification/bundles/

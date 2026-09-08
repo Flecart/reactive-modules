@@ -5,6 +5,9 @@ target
 *.txt
 # *.smv
 *.lean
+!verification/**/*.lean
+verification/lean/.lake/
+verification/bundles/
 *.smt
 *.smt2
 *.so

@@ -14,6 +14,10 @@ It lacks documentation in many places and can change at any moment.**
 
 ## Building
 
+For the opt-in typed Python → RM → Lean pipeline and example library guarantees,
+see [Checked Python libraries](verification/README.md). This is separate from
+the existing permissive Python analyzer.
+
 For building, you need the standard Rust development environment and Cargo.
 If you want to build the Python API too, you will need also
 Python in version 3.10-3.13 installed (see below).
@@ -155,4 +159,3 @@ maturin develop
 # run a test
 python tests/test.py
 ```
-
