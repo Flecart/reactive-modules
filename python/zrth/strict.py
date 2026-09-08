@@ -64,6 +64,10 @@ class ScalarValidator(ast.NodeVisitor):
                   and isinstance(n.value, ast.Name) and n.value.id == "self"}
         if fields & parameters:
             self.reject(node, "parameter names must not shadow self fields")
+        locals_ = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+                   and isinstance(n.ctx, ast.Store)}
+        if fields & locals_:
+            self.reject(node, "local names must not shadow self fields")
         for statement in node.body:
             self.visit(statement)
 

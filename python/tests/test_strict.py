@@ -101,3 +101,34 @@ def test_tensor_conditions_are_not_python_scalar_conditions():
     wires = {name: Var(Bool([2, 2])) for name in ("enabled", "flag")}
     with pytest.raises(StrictPythonError, match="wire shapes"):
         convert_method(Boolean.step, wires, [], builder=LIATermBuilder(), strict=True)
+
+
+def test_local_and_attribute_names_are_not_conflated():
+    tree = ast.parse("def step(self, value):\n    x = value\n    self.x = self.x + x")
+    with pytest.raises(StrictPythonError, match="local names must not shadow"):
+        ScalarValidator({"x": None, "value": None}, "example.py", 1).visit(tree.body[0])
+
+
+class ConditionalHold:
+    def step(self, value):
+        if value > 0:
+            self.x = value
+
+
+class EarlyReturn:
+    def step(self, value):
+        if value < 0:
+            return
+        self.x = value
+
+
+@pytest.mark.parametrize("cls", [ConditionalHold, EarlyReturn])
+@pytest.mark.parametrize("value", [-2, 0, 3])
+def test_untaken_assignments_hold_state(cls, value):
+    wires = {name: Var(Int([1, 1])) for name in ("x", "value")}
+    terms = convert_method(cls.step, wires, [], builder=LIATermBuilder(), strict=True)
+    actual = evaluate(terms, {wires["x"]: torch.tensor([[7]]), wires["value"]: torch.tensor([[value]])})
+    expected = cls()
+    expected.x = 7
+    expected.step(value)
+    assert actual[X(wires["x"])].item() == expected.x
