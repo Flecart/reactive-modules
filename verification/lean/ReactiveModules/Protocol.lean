@@ -5,6 +5,16 @@ namespace ReactiveModules.Protocol
 
 def environment (values : List Int) : Nat → Int := fun i => values[i]?.getD 0
 
+/-- Compact certificate data; correctness uses checkedRun, not trust in a lookup table. -/
+inductive ValueTree where
+  | leaf (value : Int)
+  | branch (splitAt : Nat) (left right : ValueTree)
+
+def ValueTree.lookup : ValueTree → Nat → Int
+  | .leaf value, _ => value
+  | .branch splitAt left right, i =>
+      if i < splitAt then left.lookup i else right.lookup i
+
 def bounded (bound : Nat) : Expr → Bool
   | .var n => n < bound
   | .lit _ | .boolean _ => true
@@ -27,25 +37,25 @@ theorem eval_agrees (e : Expr) (n : Nat) (a b : Nat → Int)
 
 /-- Values are supplied by an untrusted evaluator. Every term equation and
     backward wire dependency is independently checked in the kernel. -/
-def checkedTerms (values : Array Int) (cursor : Nat) : List Expr → Bool
+def checkedTerms (values : Nat → Int) (cursor : Nat) : List Expr → Bool
   | [] => true
   | e :: rest => bounded cursor e &&
-      (e.eval (fun n => values[n]?.getD 0) == values[cursor]?.getD 0) &&
+      (e.eval values == values cursor) &&
       checkedTerms values (cursor+1) rest
 
-theorem checkedTerms_correct (terms : List Expr) (values : Array Int)
+theorem checkedTerms_correct (terms : List Expr) (values : Nat → Int)
     (cursor : Nat) (env : Nat → Int)
     (checked : checkedTerms values cursor terms = true)
-    (initially : ∀ n < cursor, env n = values[n]?.getD 0) :
+    (initially : ∀ n < cursor, env n = values n) :
     ∀ n < cursor + terms.length,
-      executeWires cursor terms env n = values[n]?.getD 0 := by
+      executeWires cursor terms env n = values n := by
   induction terms generalizing cursor env with
   | nil => simpa [executeWires] using initially
   | cons e rest ih =>
     simp only [checkedTerms, Bool.and_eq_true, beq_iff_eq] at checked
-    have he : e.eval env = values[cursor]?.getD 0 :=
+    have he : e.eval env = values cursor :=
       (eval_agrees e cursor env _ checked.1.1 initially).trans checked.1.2
-    have hp : ∀ n < cursor+1, ReactiveModules.update env cursor (e.eval env) n = values[n]?.getD 0 := by
+    have hp : ∀ n < cursor+1, ReactiveModules.update env cursor (e.eval env) n = values n := by
       intro n hn
       by_cases h : n = cursor
       · simpa [ReactiveModules.update, h] using he
@@ -54,14 +64,14 @@ theorem checkedTerms_correct (terms : List Expr) (values : Array Int)
     simpa [executeWires, Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using
       ih (cursor+1) (ReactiveModules.update env cursor (e.eval env)) checked.2 hp
 
-def checkedRun (g : Graph) (env : Nat → Int) (values : Array Int) : Bool :=
-  (List.range g.inputs).all (fun n => env n == values[n]?.getD 0) &&
+def checkedRun (g : Graph) (env : Nat → Int) (values : Nat → Int) : Bool :=
+  (List.range g.inputs).all (fun n => env n == values n) &&
   checkedTerms values g.inputs g.terms &&
   g.outputs.all (fun n => n < g.inputs + g.terms.length)
 
-theorem checkedRun_correct (g : Graph) (env : Nat → Int) (values : Array Int)
+theorem checkedRun_correct (g : Graph) (env : Nat → Int) (values : Nat → Int)
     (checked : checkedRun g env values = true) :
-    g.run env = g.outputs.map (fun n => values[n]?.getD 0) := by
+    g.run env = g.outputs.map values := by
   simp only [checkedRun, Bool.and_eq_true, List.all_eq_true] at checked
   apply List.map_congr_left
   intro n hn
@@ -69,6 +79,27 @@ theorem checkedRun_correct (g : Graph) (env : Nat → Int) (values : Array Int)
   · intro i hi
     exact of_decide_eq_true (checked.1.1 i (List.mem_range.mpr hi))
   · exact of_decide_eq_true (checked.2 n hn)
+
+theorem checkedTerms_append (values : Nat → Int) (a b : List Expr) (cursor : Nat) :
+    checkedTerms values cursor (a ++ b) =
+      (checkedTerms values cursor a && checkedTerms values (cursor+a.length) b) := by
+  induction a generalizing cursor with
+  | nil => simp [checkedTerms]
+  | cons e rest ih =>
+    simp [checkedTerms, ih, Bool.and_assoc, Nat.add_assoc, Nat.add_comm, Nat.add_left_comm]
+
+def CheckedBlocks (values : Nat → Int) (cursor : Nat) : List (List Expr) → Prop
+  | [] => True
+  | block :: rest => checkedTerms values cursor block = true ∧
+      CheckedBlocks values (cursor+block.length) rest
+
+theorem checkedBlocks_correct (values : Nat → Int) (blocks : List (List Expr)) (cursor : Nat)
+    (h : CheckedBlocks values cursor blocks) : checkedTerms values cursor blocks.flatten = true := by
+  induction blocks generalizing cursor with
+  | nil => rfl
+  | cons block rest ih =>
+    rw [List.flatten_cons, checkedTerms_append, h.1, ih _ h.2]
+    rfl
 
 /-- Atom blocks share latched inputs and fresh next/intermediate wires. The
     exporter resolves next dependencies in RM's atom order and rejects cycles. -/
@@ -94,6 +125,13 @@ theorem flatten_correct (blocks : List (List Expr)) (cursor : Nat) (env : Nat �
   | cons block rest ih =>
     simp only [List.flatten_cons, execute_append, rounds, ih]
 
+/-- Keep Graph.run opaque when instantiating large concrete certificates. -/
+theorem graph_blocks_correct (g : Graph) (blocks : List (List Expr))
+    (layout : g.terms = blocks.flatten) (env : Nat → Int) :
+    g.run env = g.outputs.map (rounds g.inputs blocks env) := by
+  unfold Graph.run
+  rw [layout, flatten_correct]
+
 structure Model where
   initial : Graph
   transition : Graph
@@ -101,6 +139,18 @@ structure Model where
 def Model.start (m : Model) (i : List Int) : List Int := m.initial.run (environment i)
 def Model.step (m : Model) (s i : List Int) : List Int :=
   m.transition.run (environment (s ++ i))
+
+theorem start_checked (initial transition : Graph) (i result : List Int) (values : Nat → Int)
+    (checked : checkedRun initial (environment i) values = true)
+    (output : initial.outputs.map values = result) :
+    Model.start ⟨initial, transition⟩ i = result :=
+  (checkedRun_correct initial (environment i) values checked).trans output
+
+theorem step_checked (initial transition : Graph) (s i result : List Int) (values : Nat → Int)
+    (checked : checkedRun transition (environment (s ++ i)) values = true)
+    (output : transition.outputs.map values = result) :
+    Model.step ⟨initial, transition⟩ s i = result :=
+  (checkedRun_correct transition (environment (s ++ i)) values checked).trans output
 
 def Model.lts (m : Model) (inputDomain : List Int → Prop) : Cslib.LTS (List Int) (List Int) :=
   ⟨fun s i t => inputDomain i ∧ m.step s i = t⟩

@@ -81,6 +81,14 @@ def test_input_domains():
     with pytest.raises(ValueError,match="above"):Simulation(p.artifact()).step(value=3)
 
 
+def test_step_counterexample_respects_state_domain():
+    p=register(); p.state["x"]=Field(minimum=1)
+    p.properties=(PropertySpec("positive_premise",op("ge",ref("x"),lit(1)),"step"),)
+    result=solver_checks(p.artifact(),1,2)["positive_premise"]
+    assert result["z3"]=="no-counterexample-through-k"
+    assert result["induction"]=="solver-unsat"
+
+
 def test_stale_source(tmp_path):
     source=tmp_path/"source.py"; source.write_text("version=1")
     p=register(); p.sources=(str(source),); a=p.artifact(); source.write_text("version=2")
@@ -105,3 +113,17 @@ def test_register_positive_proof(tmp_path):
     from protocol_register import build
     result=check(build(),"both",directory=tmp_path,depth=2)
     assert result["properties"]["nonnegative"]["lean"]=="lean-proved"
+
+
+@pytest.mark.parametrize("kind", ["reachability", "step", "leads-to"])
+def test_kernel_witness_obligation_kinds(tmp_path, kind):
+    p=register()
+    formula=op("eq",ref("x"),lit(1 if kind=="reachability" else 0))
+    witness={"initial_inputs":[0],"actions":[[1]]}
+    if kind=="leads-to": witness["idle"]=[1]
+    p.properties=(PropertySpec("witness",formula,kind,
+        trigger=op("eq",ref("x"),lit(1)) if kind=="leads-to" else None,
+        witness=witness if kind!="step" else {"initial_inputs":[0],"actions":[[1],[1]]}),)
+    result=check(p,"lean",directory=tmp_path)
+    expected="lean-proved" if kind=="reachability" else "lean-refuted"
+    assert result["properties"]["witness"]["lean"]==expected

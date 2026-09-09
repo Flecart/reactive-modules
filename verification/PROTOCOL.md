@@ -71,6 +71,12 @@ instruction dispatcher. Supplied numerical wire certificates are checked by
 `checkedRun_correct`; dependency bounds and every equation are verified in the
 kernel. No `native_decide`, SMT axiom, or general SMT-proof replay is used.
 
+Numerical witnesses use balanced lookup functions and 32-term proof chunks to
+keep kernel reduction tractable. These are certificate packaging choices, not
+protocol bounds or another execution VM. Generated definitions are explicitly
+`noncomputable` to skip executable-code generation; this does not disable kernel
+reduction or introduce axioms. Style linters are disabled only in generated files.
+
 Proof snippets can bind `proof` and `theorem` in a PropertySpec. The runner checks
 `example : ProtocolArtifact.obligationN := suppliedTheorem`, not just its name.
 Snippets cannot import another artifact or use admissions; axiom auditing allows

@@ -6,8 +6,10 @@ inhabit the generated obligation type; theorem names alone confer no status.
 from __future__ import annotations
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 
 from .protocol import validate_artifact, run_graph
@@ -80,7 +82,9 @@ def solver_checks(a,depth,timeout):
             if p["kind"]=="step" and k==0: continue
             env=states[-2]+actions[-1]+states[-1] if p["kind"]=="step" else states[-1]
             goal=zexpr(p["resolved"],env)
-            s.push(); s.add(goal if p["kind"]=="reachability" else z3.Not(goal))
+            s.push()
+            if p["kind"]=="step": s.add(domains(a["state"],states[-2]))
+            s.add(goal if p["kind"]=="reachability" else z3.Not(goal))
             answer=s.check()
             if answer==z3.sat:
                 model=s.model()
@@ -128,17 +132,18 @@ def lean_domain(fields):
 
 def certificate(a):
     lines=["import ReactiveModules.Protocol", "open ReactiveModules ReactiveModules.Protocol",
+           "noncomputable section", "set_option linter.all false",
            "namespace ProtocolArtifact", "set_option maxRecDepth 1000000",
            "set_option maxHeartbeats 0", f"-- Artifact SHA256 {a['sha256']}"]
     for phase in ("init","update"):
         g=a[phase]; blocks=[]; cursor=0
         for size in g["blocks"]:
             blocks.append(lean_list(map(lean_expr,g["terms"][cursor:cursor+size]))); cursor+=size
-        lines += [f"def {phase}Graph : Graph := {lean_graph(g)}",
-                  f"def {phase}Blocks : List (List Expr) := {lean_list(blocks)}",
+        lines += [f"def {phase}Blocks : List (List Expr) := {lean_list(blocks)}",
+                  f"def {phase}Graph : Graph := ⟨{g['inputs']}, {phase}Blocks.flatten, {lean_list(map(str,g['outputs']))}⟩",
                   f"theorem {phase}_execution (env : Nat → Int) :",
-                  f"  {phase}Graph.run env = {phase}Graph.outputs.map (rounds {g['inputs']} {phase}Blocks env) := by",
-                  f"  exact congrArg (fun f => {phase}Graph.outputs.map f) (flatten_correct {phase}Blocks {g['inputs']} env)",
+                  f"  {phase}Graph.run env = {phase}Graph.outputs.map (rounds {phase}Graph.inputs {phase}Blocks env) :=",
+                  f"  graph_blocks_correct {phase}Graph {phase}Blocks rfl env",
                   f"#print axioms {phase}_execution"]
     lines += ["def model : Model := ⟨initGraph, updateGraph⟩",
               f"def inputDomain (v : List Int) : Prop := {lean_domain(a['inputs'])}",
@@ -155,19 +160,35 @@ def certificate(a):
             lines.append(f"def trigger{n} : Expr := {lean_expr(p['resolved_trigger'])}")
             body=f"LeadsTo model inputDomain trigger{n} formula{n}"
         lines.append(f"def obligation{n} : Prop := {body}")
-    return "\n".join(lines+["end ProtocolArtifact",""])
+    # Proof data need kernel reduction, not executable code generation.
+    return "\n".join(lines+["end ProtocolArtifact",""]).replace("\ndef ","\nnoncomputable def ")
 
 
 def _lean(directory,name,source,timeout):
     path=directory/f"{name}.lean"; path.write_text(source)
-    process=subprocess.run(["lake","env","lean",str(path)],cwd=project_root(),
-        text=True,capture_output=True,timeout=timeout)
-    (directory/f"{name}.log").write_text(process.stdout+process.stderr)
-    if process.returncode: raise RuntimeError(f"Lean rejected {name}; see {directory/name}.log")
-    audit_axioms(process.stdout+process.stderr)
+    log=directory/f"{name}.log"
+    with log.open("w") as output:
+        process=subprocess.Popen(["lake","env","lean","-j1",str(path)],cwd=project_root(),
+            text=True,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+        try: process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Terminate this check's process group, including lake's Lean child.
+            try: os.killpg(process.pid,signal.SIGTERM)
+            except ProcessLookupError: pass
+            try: process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid,signal.SIGKILL); process.wait()
+            raise
+    if path.read_text()!=source: raise ValueError("generated proof changed during checking")
+    if process.returncode: raise RuntimeError(f"Lean rejected {name} (exit {process.returncode}); see {log}")
+    audit_axioms(log.read_text())
 
 
 def replay(a,trace):
+    rows=[trace["initial_inputs"],*trace["actions"],*trace["states"]]
+    if "idle" in trace: rows.append(trace["idle"])
+    if any(type(row) is not list or any(type(v) is not int for v in row) for row in rows):
+        raise ValueError("witnesses must contain encoded integer wire values")
     current=run_graph(a["init"],trace["initial_inputs"])
     if current != trace["states"][0]: raise ValueError("incorrect initial witness")
     for i,expected in zip(trace["actions"],trace["states"][1:],strict=True):
@@ -178,27 +199,58 @@ def replay(a,trace):
 def witness_source(a,p,n,source,trace):
     """Kernel replay plus an actual proof of the specified (negated) obligation."""
     trace=dict(trace)
+    if any(type(row) is not list or any(type(v) is not int for v in row)
+           for row in [trace["initial_inputs"],*trace["actions"]]):
+        raise ValueError("witnesses must contain encoded integer wire values")
     if "states" not in trace:
         states=[run_graph(a["init"],trace["initial_inputs"])]
         for action in trace["actions"]: states.append(run_graph(a["update"],states[-1]+action))
         trace["states"]=states
     replay(a,trace)
-    rows=[source,"open ProtocolArtifact", "namespace Witness", "set_option maxRecDepth 1000000", "set_option maxHeartbeats 0"]
+    rows=[source,"open ProtocolArtifact", "namespace Witness", "set_option Elab.async false",
+          "set_option maxRecDepth 1000000", "set_option maxHeartbeats 0"]
+    def progress(label):
+        return f"-- Certificate stage: {label}"
     ints=lambda v:lean_list(f"({x})" for x in v)
-    rows += [f"def initialInput : List Int := {ints(trace['initial_inputs'])}",
+    rows += [progress("initial input domain"),f"def initialInput : List Int := {ints(trace['initial_inputs'])}",
              "theorem initial_allowed : inputDomain initialInput := by decide"]
     for t,state in enumerate(trace["states"]): rows.append(f"def state{t} : List Int := {ints(state)}")
-    def equality(name,phase,args,environment,result,statement):
+    def equality(name,phase,args,environment,result,statement,model_args):
         env=list(args)
         for term in a[phase]["terms"]: env.append(evaluate(term,env))
-        return [f"def {name}Values : Array Int := #{ints(env)}",
-                f"theorem {name} : {statement} := by",
-                f"  change {phase}Graph.run ({environment}) = {result}",
-                f"  calc _ = {phase}Graph.outputs.map (fun j => {name}Values[j]?.getD 0) :=",
-                f"      checkedRun_correct {phase}Graph ({environment}) {name}Values (by decide)",
-                "       _ = _ := by decide"]
+        # Kernel reduction of huge List/Array lookups is expensive. A balanced
+        # lookup function supplies exactly the same untrusted numerical values.
+        runs=[(k,v) for k,v in enumerate(env) if k==0 or v!=env[k-1]]
+        def lookup(rows):
+            if len(rows)==1: return f"(.leaf ({rows[0][1]}))"
+            middle=len(rows)//2
+            return f"(.branch {rows[middle][0]} {lookup(rows[:middle])} {lookup(rows[middle:])})"
+        chunks=[a[phase]["terms"][k:k+32] for k in range(0,len(a[phase]["terms"]),32)]
+        lines=[progress(name+" values"),f"def {name}Tree : ValueTree := {lookup(runs) if runs else '.leaf 0'}",
+               f"def {name}Values : Nat → Int := {name}Tree.lookup"]
+        lines.append(f"#print axioms {name}Values")
+        for k,chunk in enumerate(chunks):
+            if k%64==0: lines.append(progress(f"{name} chunk {k}/{len(chunks)}"))
+            lines += [f"def {name}Chunk{k} : List Expr := {lean_list(map(lean_expr,chunk))}",
+                      f"theorem {name}Checked{k} : checkedTerms {name}Values {a[phase]['inputs']+32*k} {name}Chunk{k} = true := by decide"]
+            if k%64==0: lines.append(f"#print axioms {name}Checked{k}")
+        chunk_names=lean_list(f"{name}Chunk{k}" for k in range(len(chunks)))
+        proof="True.intro"
+        for k in reversed(range(len(chunks))): proof=f"⟨{name}Checked{k}, {proof}⟩"
+        lines += [progress(name+" combine chunks"),f"theorem {name}Terms : checkedTerms {name}Values {phase}Graph.inputs {phase}Graph.terms = true :=",
+                  "  by",
+                  f"    have layout : {chunk_names}.flatten = {phase}Graph.terms := by rfl",
+                  "    rw [← layout]",
+                  f"    exact checkedBlocks_correct {name}Values {chunk_names} {phase}Graph.inputs ({proof})",
+                  f"#print axioms {name}Terms"]
+        return lines+[
+                progress(name+" complete equation"),
+                f"theorem {name}CheckedRun : checkedRun {phase}Graph ({environment}) {name}Values = true := by",
+                f"  unfold checkedRun; rw [Bool.and_eq_true, Bool.and_eq_true]; exact ⟨⟨by decide, {name}Terms⟩, by decide⟩",
+                f"theorem {name} : {statement} :=",
+                f"  {'start' if phase=='init' else 'step'}_checked initGraph updateGraph {model_args} {result} {name}Values {name}CheckedRun (by decide)"]
     rows += equality("initial_eq","init",trace["initial_inputs"],"environment initialInput","state0",
-                     "model.start initialInput = state0")
+                     "model.start initialInput = state0","initialInput")
     rows += [
              "theorem reachable0 : Reachable model inputDomain state0 := by",
              "  rw [← initial_eq]; exact .initial _ initial_allowed"]
@@ -207,7 +259,7 @@ def witness_source(a,p,n,source,trace):
                  f"theorem allowed{t} : inputDomain action{t} := by decide"]
         rows += equality(f"step{t}","update",trace["states"][t]+action,
                          f"environment (state{t} ++ action{t})",f"state{t+1}",
-                         f"model.step state{t} action{t} = state{t+1}")
+                         f"model.step state{t} action{t} = state{t+1}",f"state{t} action{t}")
         rows += [
                  f"theorem reachable{t+1} : Reachable model inputDomain state{t+1} := by",
                  f"  rw [← step{t}]; exact .advance _ _ reachable{t} allowed{t}"]
@@ -218,7 +270,7 @@ def witness_source(a,p,n,source,trace):
         if run_graph(a["update"],trace["states"][-1]+idle)!=trace["states"][-1]: raise ValueError("not a stuttering lasso")
         rows += [f"def idleInput : List Int := {ints(idle)}"]
         rows += equality("fixed","update",trace["states"][-1]+idle,f"environment (state{end} ++ idleInput)",
-                         f"state{end}",f"model.step state{end} idleInput = state{end}")
+                         f"state{end}",f"model.step state{end} idleInput = state{end}",f"state{end} idleInput")
         rows += [
                  f"theorem result : ¬ obligation{n} := idle_refutes model inputDomain trigger{n} formula{n}",
                  f"  state{end} idleInput reachable{end} (by decide) fixed (by decide) (by decide)"]
@@ -234,7 +286,8 @@ def witness_source(a,p,n,source,trace):
         rows += [f"theorem result : ¬ obligation{n} := by",
                  f"  intro h; have bad := h state{end-1} action{end-1} (by decide) allowed{end-1}",
                  f"  rw [step{end-1}] at bad; exact bad (by decide)"]
-    return "\n".join(rows+["#print axioms result","end Witness",""])
+    return ("\n".join(rows+["#print axioms result","end Witness",""])
+            .replace("\ndef ","\nnoncomputable def ").replace("by decide","by decide +kernel"))
 
 
 def check(a,backend="both",*,directory="protocol-evidence",depth=16,timeout=30):

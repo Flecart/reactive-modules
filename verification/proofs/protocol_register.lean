@@ -7,7 +7,7 @@ theorem nonnegative : obligation0 := by
     intro s h
     induction h with
     | initial i hi =>
-      simp [model, Model.start, initGraph, Graph.run, executeWires,
+      simp [model, Model.start, initGraph, initBlocks, Graph.run, executeWires,
         Expr.eval, environment, ReactiveModules.update]
     | advance s i _ hi ih =>
       obtain ⟨x, rfl⟩ := List.length_eq_one_iff.mp ih.1
@@ -21,7 +21,7 @@ theorem nonnegative : obligation0 := by
           subst tail
           have hx : 0 ≤ x := by simpa [environment] using ih.2
           have hv : 0 ≤ offered := by simpa [inputDomain, environment] using hi.2.2
-          simp [model, Model.step, updateGraph, Graph.run, executeWires,
+          simp [model, Model.step, updateGraph, updateBlocks, Graph.run, executeWires,
             Expr.eval, environment, ReactiveModules.update]
           split <;> assumption
   intro s h
